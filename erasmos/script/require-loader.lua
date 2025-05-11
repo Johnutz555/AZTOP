@@ -1,97 +1,196 @@
-getgenv().isSynapseV3 = not not gethui;
+import solara
+import requests
+import json
+import hashlib
+from typing import Dict, Optional
 
-getgenv().disableenvprotection = function() end;
-getgenv().enableenvprotection = function() end;
+# Replace with your actual server address and API key
+SERVER_URL = "http://localhost:4566"
+API_KEY = "a35d863f-865e-4669-8c3a-724c9f0749d3"
 
-getgenv().SX_VM_CNONE = function() end;
+# Global cache for required modules, analogous to cachedRequires in the Lua script
+_cached_requires: Dict[str, Optional[object]] = {}
 
-local __scripts = {};
-getgenv().__scripts = __scripts;
+def _fetch_file(url: str) -> Optional[str]:
+    """
+    Fetches the content of a file from the server.  Handles potential errors.
+    """
+    try:
+        response = requests.post(
+            f"{SERVER_URL}/getFile",
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": API_KEY,
+            },
+            json={"paths": [url, ""]},  #  Mimic the Lua script's path structure
+        )
+        response.raise_for_status()  # Raise an exception for bad status codes
+        return response.text
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Failed to fetch {url}: {e}")
+        return None
 
-local debugInfo = debug.info;
+def _load_and_execute_script(script_content: str, script_name: str) -> Optional[object]:
+    """
+    Loads and executes Python code (equivalent to Lua's loadstring).
+    Handles potential syntax errors and execution errors.
+    """
+    try:
+        #  In Python, we use exec() for dynamic code execution, similar to loadstring() in Lua
+        #  We create a local namespace to mimic the behavior of a script environment.
+        local_namespace = {}
+        exec(script_content, local_namespace)
 
-local HttpService = game:GetService('HttpService');
-local info = debugInfo(1, 's');
-__scripts[info] = 'require-loader';
+        #  Check if the script defined a main function (common pattern)
+        if "main" in local_namespace:
+            return local_namespace["main"]()  # Execute the main function
+        elif "__getattr__" in local_namespace: #Check for a class.
+            return local_namespace
+        elif len(local_namespace) > 0:
+            # Return the first function or object defined in the script.
+            for key, value in local_namespace.items():
+                if callable(value) or not key.startswith("__"): # Exclude private attributes
+                    return value
+        else:
+            return None # Script did not define anything to return
+    except SyntaxError as e:
+        print(f"[ERROR] Syntax error in {script_name}: {e}")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Error executing {script_name}: {e}")
+        return None
 
-local cachedRequires = {};
-_G.cachedRequires = cachedRequires;
+def custom_require(url: str) -> Optional[object]:
+    """
+    Custom require function to fetch and execute scripts from a server,
+    analogous to the customRequire function in the Lua script.
+    """
+    if not isinstance(url, str):
+        raise TypeError("url must be a string")
 
-local originalRequire = require;
-local apiKey =                                                                                                                                                                                                                                                                                                                     'a35d863f-865e-4669-8c3a-724c9f0749d3';
+    #  Use url as filename, strip any leading ../
+    filename = url.split('/')[-1]
 
-local function customRequire(url, useHigherLevel)
-    if (typeof(url) ~= 'string' or not checkcaller()) then
-        return originalRequire(url);
-    end;
+    if filename not in _cached_requires:
+        script_content = _fetch_file(url)
+        if script_content is None:
+            return None  #  Return None on failure, consistent with error handling
 
-    local requirerScriptId = debugInfo(useHigherLevel and 3 or 2, 's');
-    local requirerScript = __scripts[requirerScriptId];
+        #  Check file extension.  Crucial for security.
+        if filename.endswith(".lua"):
+            print("[WARN] .lua file extension found, this is unusual, was this supposed to be python?")
 
-    local requestData = syn.request({
-        Url = string.format('%s/%s', 'http://localhost:4566', 'getFile'),
-        Method = 'POST',
-        Headers = {
-            ['Content-Type'] = 'application/json',
-            Authorization = apiKey
-        },
-        Body = HttpService:JSONEncode({
-            paths = {url, requirerScript}
-        })
-    });
+        elif filename.endswith(".py"):
+          _cached_requires[filename] = _load_and_execute_script(script_content, filename)
+        elif filename.endswith(".json"):
+            try:
+                _cached_requires[filename] = json.loads(script_content)
+            except json.JSONDecodeError as e:
+                print(f"[ERROR] Invalid JSON in {filename}: {e}")
+                return None
+        else:
+            _cached_requires[filename] = script_content # treat as data
+    return _cached_requires[filename]
 
-    if (not requestData.Success) then
-        warn(string.format('[ERROR] Script bundler couldn\'t find %s', url));
-        return task.wait(9e9);
-    end;
 
-    local scriptContent = requestData.Body;
-    local extension = url:match('.+%w+%p(%w+)');
+def shared_require(url: str) -> Optional[object]:
+    """
+    Shared require function to cache and reuse required modules,
+    analogous to the customRequireShared function in the Lua script.
+    """
+    filename = url.split('/')[-1] # extract filename
+    if filename not in _cached_requires:
+        _cached_requires[filename] = custom_require(url)
+    return _cached_requires[filename]
 
-    if (extension ~= 'lua') then
-        return scriptContent;
-    end;
 
-    local scriptName = requestData.Headers['File-Path'] or url;
-    local scriptFunction, syntaxError = loadstring(scriptContent, scriptName);
 
-    if (not scriptFunction) then
-        warn(string.format('[ERROR] Detected syntax error for %s', url));
-        warn(syntaxError);
-        return task.wait(9e9);
-    end;
+@solara.component
+def ScriptLoader():
+    """
+    Solara component to demonstrate the custom_require and shared_require functions.
+    """
+    status, set_status = solara.use_state("Loading...")
+    loaded_data, set_loaded_data = solara.use_state[object](None)
+    error_message, set_error_message = solara.use_state[str](None)
 
-    local scriptId = debugInfo(scriptFunction, 's');
-    __scripts[scriptId] = scriptName;
+    def load_script():
+        set_status("Loading script...")
+        try:
+            #  Example usage:  Load a Python "module" (simulated script)
+            #  In a real application, you'd replace this with a path to your server.
+            #  For this example, we'll define a simple Python script as a string.
+            #
+            #  Important:  For security, you should NEVER load and execute
+            #  arbitrary code from an untrusted source.  This is just for
+            #  demonstration purposes.  In a real application, the "scripts"
+            #  would be carefully controlled modules within your project.
 
-    return scriptFunction();
-end;
+            # Simulate a simple python module.
+            simulated_module_code = """
+def hello():
+    return "Hello from the simulated module!"
 
-local function customRequireShared(url)
-    local fileName = url:match('%w+%.lua') or url:match('%w+%.json');
+class MyClass:
+    def __init__(self, name):
+        self.name = name
 
-    if (not cachedRequires[fileName]) then
-        cachedRequires[fileName] = customRequire(url, true);
-    end;
+    def get_name(self):
+        return f"My name is {self.name}"
 
-    return cachedRequires[fileName];
-end;
+def main():
+  return "This is the main function"
+            """
+            # Create a temporary file
+            with open("simulated_module.py", "w") as f:
+                f.write(simulated_module_code)
+            #  Use a relative URL for demonstration
+            #loaded_module = custom_require("simulated_module.py") # This would be the correct way.
+            loaded_module = custom_require("./simulated_module.py")
+            if loaded_module:
+                if callable(loaded_module):
+                  set_loaded_data(loaded_module()) # Call the function if it is callable.
+                elif hasattr(loaded_module, "__getattr__"):
+                   set_loaded_data(loaded_module)
+                else:
+                  set_loaded_data(loaded_module)
+                set_status("Script loaded successfully.")
+            else:
+                set_error_message("Failed to load script.")
+                set_status("Error")
 
-local gameList = HttpService:JSONDecode(customRequireShared('../gameList.json'));
+            # Example of loading JSON data
+            json_data = shared_require("./data.json")
 
-getgenv().require = customRequire;
-getgenv().sharedRequire = customRequireShared;
+            if json_data:
+                print(f"Loaded JSON data: {json_data}")
+            else:
+                print("Failed to load JSON data.")
+        except Exception as e:
+            set_error_message(f"An error occurred: {e}")
+            set_status("Error")
 
-getgenv().aztupHubV3Ran = false;
-getgenv().aztupHubV3RanReal = false;
-getgenv().scriptKey,getgenv().websiteKey='29be76a3-ad9f-4c27-aa3a-e78590f61971','8b21dab5-1432-4620-bf61-735fcfd240df';
+    # Simulate a json file.
+    simulated_json_data = """
+    {
+        "name": "John Doe",
+        "age": 30,
+        "city": "New York"
+    }
+    """
 
-local function GAMES_SETUP()
-    local gameName = gameList[tostring(game.GameId)];
-    if (not gameName) then return warn('no custom game for this game'); end;
-    require(string.format('games/%s.lua', gameName:gsub('%s', '')));
-end;
+    with open("data.json", "w") as f:
+        f.write(simulated_json_data)
+    solara.Button("Load Script", on_click=load_script)
 
-getgenv().GAMES_SETUP = GAMES_SETUP;
-getgenv().getServerConstant = function(...) return ... end;
-customRequire('source.lua');
+    solara.Text(status)
+    if loaded_data:
+        if callable(loaded_data):
+          solara.Text(f"Result: {loaded_data()}")
+        elif isinstance(loaded_data, type): #check for class
+            obj = loaded_data("Test Instance")
+            solara.Text(f"Result: {obj.get_name()}")
+        else:
+          solara.Text(f"Result: {loaded_data}")
+    if error_message:
+        solara.Error(error_message)
