@@ -11,7 +11,7 @@ local ControlModule = sharedRequire('../classes/ControlModule.lua');
 
 -- Services
 local Players, ReplicatedStorage, RunService, Lighting, MemStorageService, TeleportService = Services:Get('Players', 'ReplicatedStorage', 'RunService', 'Lighting', 'MemStorageService', 'TeleportService');
-local MAIN_PLACE_ID = 10266164381;
+local MAIN_PLACE_ID = 18967105490;
 
 if (game.PlaceId ~= MAIN_PLACE_ID) then
     return ToastNotif.new({text = 'Script will not run in lobby.'});
